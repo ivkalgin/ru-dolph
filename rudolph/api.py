@@ -4,6 +4,8 @@ from glob import glob
 from os.path import join
 from datetime import datetime
 from collections import Counter
+from time import perf_counter
+from functools import wraps
 
 import torch
 import torchvision
@@ -29,6 +31,33 @@ DEFAULT_SPC_TOKENS = {
     '<LT_T2T>': 16388,
     '<RT_I2T>': 16389,
 }
+
+
+def print_time_deco(method):
+    @wraps(method)
+    def method_wrapper(self, *args, **kwargs):
+        self.track_model_time = True
+        try:
+            t_0 = perf_counter()
+            result = method(self, *args, **kwargs)
+            t_1 = perf_counter()
+
+            method_dt = t_1 - t_0
+            model_dt = sum(self.model_time)
+
+            print(
+                f'Time taken to execute:\n'
+                f'\tmodel time = {model_dt:.3f} s\n'
+                f'\tother time = {method_dt - model_dt:.3f} s\n'
+                f'\ttotal time = {method_dt:.3f} s'
+            )
+
+            return result
+        finally:
+            self.track_model_time = False
+            self.model_time = []
+
+    return method_wrapper
 
 
 class ruDolphApi:
@@ -73,6 +102,24 @@ class ruDolphApi:
         ]
         self.quite = quite
 
+        self.track_model_time = False
+        self.model_time = []
+
+    def _run_model(self, *args, **kwargs):
+        if self.track_model_time:
+            torch.cuda.synchronize()
+            t_0 = perf_counter()
+
+        output = self.model(*args, **kwargs)
+
+        if self.track_model_time:
+            torch.cuda.synchronize()
+            t_1 = perf_counter()
+            self.model_time.append(t_1 - t_0)
+
+        return output
+
+    @print_time_deco
     def dream(self, text, images_num, codebooks_num, image_prompts=None, template=None,
               top_k=768, top_p=0.99, temperature=1.0,
               bs=None, seed=None, use_cache=True, special_token='<LT_T2I>', ppl_txt_w=0.95):
@@ -148,8 +195,8 @@ class ruDolphApi:
                     if image_prompts is not None and idx in prompts_idx:
                         out = torch.cat((out, prompts[:, idx].unsqueeze(1)), dim=-1)
                     else:
-                        logits, cache = self.model(out, attention_mask,
-                                                   cache=cache, use_cache=use_cache, return_loss=False)
+                        logits, cache = self._run_model(out, attention_mask,
+                                                        cache=cache, use_cache=use_cache, return_loss=False)
                         logits = logits[:, -1, self.vocab_size:]
                         if self.image_special_tokens:
                             logits = logits[:, :-self.image_special_tokens]
@@ -186,7 +233,7 @@ class ruDolphApi:
                     r_encoded.unsqueeze(0).repeat(chunk_bs, 1).to(self.device),
                 ), dim=1)
 
-                logits, _ = self.model(input_ids, attention_mask, cache=None, use_cache=False, return_loss=False)
+                logits, _ = self._run_model(input_ids, attention_mask, cache=None, use_cache=False, return_loss=False)
                 logits = rearrange(logits, 'b n c -> b c n')
                 image_logits = logits[:, self.vocab_size:,
                                       self.l_text_seq_length:self.l_text_seq_length + self.image_seq_length - 1]
@@ -220,6 +267,7 @@ class ruDolphApi:
 
         return ppl_txt.cpu().numpy(), ppl_img.cpu().numpy(), scores.cpu().numpy()
 
+    @print_time_deco
     def zs_clf(self, pil_img, classes, bs=10, r_template=None, l_template=None, seed=None,
                r_special_token='<RT_I2T>', l_special_token='<LT_I2T>'):
         self.seed_everything(seed)
@@ -263,7 +311,7 @@ class ruDolphApi:
                             cache[i][j] = t
                     cache = dict(zip(range(len(cache)), cache))
 
-                logits, cache = self.model(input_ids, attention_mask, cache=cache, use_cache=True, return_loss=False)
+                logits, cache = self._run_model(input_ids, attention_mask, cache=cache, use_cache=True, return_loss=False)
                 logits = rearrange(logits, 'b n c -> b c n')
 
                 r_text_logits = logits[:, :self.vocab_size-self.l_text_seq_length,
@@ -288,6 +336,7 @@ class ruDolphApi:
             'scores': scores.cpu().numpy(),
         }
 
+    @print_time_deco
     def generate_texts(
         self, template='',
         top_k=None, top_p=None, texts_num=48,
@@ -323,7 +372,7 @@ class ruDolphApi:
                 if not self.quite:
                     iter_range = tqdm(iter_range)
                 for _ in iter_range:
-                    logits, cache = self.model(out, attention_mask, cache=cache, use_cache=use_cache, return_loss=False)
+                    logits, cache = self._run_model(out, attention_mask, cache=cache, use_cache=use_cache, return_loss=False)
                     logits = logits[:, -1, :self.vocab_size]
                     if allowed_token_ids:
                         logits = logits[:, allowed_token_ids]
@@ -371,7 +420,7 @@ class ruDolphApi:
                 attention_mask = self.get_attention_mask(chunk_bs)
                 input_ids = chunk_encoded.to(self.device)
 
-                logits, _ = self.model(input_ids, attention_mask, cache=None, use_cache=False, return_loss=False)
+                logits, _ = self._run_model(input_ids, attention_mask, cache=None, use_cache=False, return_loss=False)
                 logits = rearrange(logits, 'b n c -> b c n')
 
                 l_text_logits = logits[:, :self.vocab_size - self.l_text_seq_length,
@@ -449,7 +498,7 @@ class ruDolphApi:
                 if not self.quite:
                     iter_range = tqdm(iter_range)
                 for _ in iter_range:
-                    logits, cache = self.model(out, attention_mask, cache=cache, use_cache=use_cache, return_loss=False)
+                    logits, cache = self._run_model(out, attention_mask, cache=cache, use_cache=use_cache, return_loss=False)
                     logits = logits[:, -1, :self.vocab_size - self.l_text_seq_length]
 
                     logits /= temperature
@@ -518,7 +567,7 @@ class ruDolphApi:
                     image_input_ids,
                 ), dim=1)
 
-                logits, _ = self.model(input_ids, attention_mask, cache=None, use_cache=False, return_loss=False)
+                logits, _ = self._run_model(input_ids, attention_mask, cache=None, use_cache=False, return_loss=False)
                 logits = rearrange(logits, 'b n c -> b c n')
 
                 image_logits = logits[:, self.vocab_size:,
@@ -598,7 +647,7 @@ class ruDolphApi:
                     else:
                         true_probs = []
                         for d, weight in enumerate(weights):
-                            logits, cache_ = self.model(out[d::len(weights)], attention_mask, use_cache=use_cache,
+                            logits, cache_ = self._run_model(out[d::len(weights)], attention_mask, use_cache=use_cache,
                                                         cache=caches[d], return_loss=False)
                             caches[d] = cache_
                             logits = logits[:, -1, self.vocab_size:]
