@@ -142,6 +142,7 @@ class ruDolphApi:
                 })
         return pil_images, result
 
+    @print_time_deco
     def image_captioning(self, pil_img, r_template='на картинке', early_stop=64, captions_num=5, seed=None, bs=None,
                          generations_num=48, top_k=None, top_p=None, temperature=None, ppl_txt_w=0.05,
                          l_special_token='<LT_T2I>', r_special_token='<RT_I2T>'):
